@@ -1,0 +1,47 @@
+name: DNS Failover Monitor - denisthiessen.de
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: 
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Homelab Health and Update DNS
+        run: |
+          MAIN_IP="49.12.221.103"
+          BACKUP_IP="212.227.103.11"
+          DOMAIN="denisthiessen.de"
+          ZONE_ID="${{ secrets.CF_ZONE_ID }}"
+          RECORD_ID="${{ secrets.CF_RECORD_ID }}"
+          API_TOKEN="${{ secrets.CF_API_TOKEN }}"
+
+          echo "Checking if main server is up..."
+          if curl -s --head --fail https://$DOMAIN > /dev/null; then
+            TARGET_IP="$MAIN_IP"
+            echo "Main server is up."
+          else
+            TARGET_IP="$BACKUP_IP"
+            echo "Main server is down. Switching to backup."
+          fi
+
+          echo "Getting current DNS record..."
+          CURRENT_IP=$(dig +short $DOMAIN @1.1.1.1)
+
+          if [[ "$CURRENT_IP" != "$TARGET_IP" ]]; then
+            echo "Updating DNS to $TARGET_IP"
+            curl -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
+              -H "Authorization: Bearer $API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data '{
+                "type": "A",
+                "name": "'"$DOMAIN"'",
+                "content": "'"$TARGET_IP"'",
+                "ttl": 120,
+                "proxied": false
+              }'
+          else
+            echo "No change needed. Current IP is already $CURRENT_IP"
+          fi
