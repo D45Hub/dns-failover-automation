@@ -2,37 +2,67 @@ name: DNS Failover Monitor - denisthiessen.de
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
-  workflow_dispatch: 
+    - cron: '*/15 * * * *'  # every 15 minutes
+  workflow_dispatch:
 
 jobs:
-  check-and-update:
+  dns-failover:
     runs-on: ubuntu-latest
     steps:
-      - name: Check Homelab Health and Update DNS
+      - name: DNS failover logic
         run: |
+          DOMAIN="denisthiessen.de"
           MAIN_IP="49.12.221.103"
           BACKUP_IP="212.227.103.11"
-          DOMAIN="denisthiessen.de"
           ZONE_ID="${{ secrets.CF_ZONE_ID }}"
           RECORD_ID="${{ secrets.CF_RECORD_ID }}"
           API_TOKEN="${{ secrets.CF_API_TOKEN }}"
 
-          echo "Checking if main server is up..."
-          if curl -s --head --fail https://$DOMAIN > /dev/null; then
+          # Custom health check path
+          HEALTH_PATH="/health"
+
+          check_up() {
+            local IP="$1"
+            local DOMAIN="$2"
+            local SCHEME="https"
+
+            echo "Testing $DOMAIN on $IP..."
+
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              --resolve "$DOMAIN:443:$IP" \
+              "$SCHEME://$DOMAIN$HEALTH_PATH")
+
+            if [[ "$STATUS" =~ ^2|3 ]]; then
+              echo "Server at $IP is UP (status $STATUS)"
+              return 0
+            else
+              echo "Server at $IP is DOWN (status $STATUS)"
+              return 1
+            fi
+          }
+
+          echo "Checking MAIN server..."
+          if check_up "$MAIN_IP" "$DOMAIN"; then
             TARGET_IP="$MAIN_IP"
-            echo "Main server is up."
           else
-            TARGET_IP="$BACKUP_IP"
-            echo "Main server is down. Switching to backup."
+            echo "Main is down. Checking BACKUP..."
+            if check_up "$BACKUP_IP" "$DOMAIN"; then
+              TARGET_IP="$BACKUP_IP"
+            else
+              echo "Both servers are down or unhealthy. Aborting DNS update."
+              exit 0
+            fi
           fi
 
           echo "Getting current DNS record..."
-          CURRENT_IP=$(dig +short $DOMAIN @1.1.1.1)
+          CURRENT_IP=$(dig +short "$DOMAIN" @1.1.1.1)
+
+          echo "Current IP: $CURRENT_IP"
+          echo "Target IP: $TARGET_IP"
 
           if [[ "$CURRENT_IP" != "$TARGET_IP" ]]; then
-            echo "Updating DNS to $TARGET_IP"
-            curl -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
+            echo "Updating DNS to point to $TARGET_IP"
+            curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
               -H "Authorization: Bearer $API_TOKEN" \
               -H "Content-Type: application/json" \
               --data '{
@@ -43,5 +73,5 @@ jobs:
                 "proxied": false
               }'
           else
-            echo "No change needed. Current IP is already $CURRENT_IP"
+            echo "DNS already points to the correct IP. No update needed."
           fi
